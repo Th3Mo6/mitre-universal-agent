@@ -1,0 +1,32 @@
+{
+  "results": [
+    {
+      "_time": "2026-06-01T12:00:00Z",
+      "_raw": "Failed password for invalid user root from 192.168.1.50 port 4022 ssh2",
+      "source": "/var/log/secure",
+      "sourcetype": "linux_secure",
+      "host": "app01",
+      "mitre_technique": ["T1110"],
+      "src_ip": "192.168.1.50",
+      "user": "root"
+    },
+    {
+      "_time": "2026-06-02T18:45:33Z",
+      "_raw": "powershell.exe -nop -w hidden -enc JABzAD0A",
+      "source": "WinEventLog:Microsoft-Windows-PowerShell/Operational",
+      "sourcetype": "WinEventLog",
+      "host": "ws-finance-07",
+      "mitre_technique": ["T1059.001"],
+      "process": "powershell.exe"
+    },
+    {
+      "_time": "2026-06-03T09:10:00Z",
+      "_raw": "GET /admin/config.php HTTP/1.1 200 - curl/7.68",
+      "source": "/var/log/nginx/access.log",
+      "sourcetype": "nginx:access",
+      "host": "web01",
+      "mitre_technique": ["T1071.001"],
+      "src_ip": "203.0.113.7"
+    }
+  ]
+}

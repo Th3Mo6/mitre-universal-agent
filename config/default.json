@@ -1,0 +1,35 @@
+{
+  "sources": {
+    "wazuh": {
+      "enabled": true,
+      "config": {
+        "endpoint": "",
+        "verify_tls": true
+      }
+    },
+    "manageengine": {
+      "enabled": false,
+      "config": {
+        "endpoint": "",
+        "verify_tls": true
+      }
+    },
+    "splunk": {
+      "enabled": false,
+      "config": {
+        "endpoint": "",
+        "verify_tls": true
+      }
+    }
+  },
+  "scheduler": {
+    "techniques_per_hour": 5,
+    "techniques_per_run": 5,
+    "mode": "even",
+    "max_concurrent": 1
+  },
+  "ai": {
+    "strategy": "single",
+    "providers": ["mock-primary"]
+  }
+}

@@ -1,0 +1,79 @@
+{
+  "alerts": [
+    {
+      "timestamp": "2026-06-01T10:00:00Z",
+      "rule": {
+        "id": "5710",
+        "level": 5,
+        "description": "sshd: Attempt to login using a non-existent user",
+        "mitre": {
+          "id": ["T1110"],
+          "tactic": ["Credential Access"],
+          "technique": ["Brute Force"]
+        }
+      },
+      "agent": {"id": "001", "name": "web01"},
+      "data": {"srcip": "10.0.0.5", "srcuser": "admin"},
+      "location": "/var/log/auth.log"
+    },
+    {
+      "timestamp": "2026-06-01T10:02:13Z",
+      "rule": {
+        "id": "5712",
+        "level": 10,
+        "description": "sshd: brute force trying to get access to the system",
+        "mitre": {
+          "id": ["T1110"],
+          "tactic": ["Credential Access"],
+          "technique": ["Brute Force"]
+        }
+      },
+      "agent": {"id": "001", "name": "web01"},
+      "data": {"srcip": "10.0.0.5", "srcuser": "admin"},
+      "location": "/var/log/auth.log"
+    },
+    {
+      "timestamp": "2026-06-02T14:30:45Z",
+      "rule": {
+        "id": "91802",
+        "level": 12,
+        "description": "Powershell: suspicious encoded command executed",
+        "mitre": {
+          "id": ["T1059.001"],
+          "tactic": ["Execution"],
+          "technique": ["PowerShell"]
+        }
+      },
+      "agent": {"id": "002", "name": "win-dc01"},
+      "data": {
+        "win": {
+          "eventdata": {
+            "commandLine": "powershell.exe -enc SQBFAFgA",
+            "image": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+          }
+        }
+      },
+      "location": "EventChannel"
+    },
+    {
+      "timestamp": "2026-06-03T08:15:00Z",
+      "rule": {
+        "id": "92052",
+        "level": 8,
+        "description": "Scheduled task created",
+        "mitre": {
+          "id": ["T1053.005"],
+          "tactic": ["Persistence"],
+          "technique": ["Scheduled Task"]
+        }
+      },
+      "agent": {"id": "002", "name": "win-dc01"},
+      "data": {
+        "win": {
+          "eventdata": {"taskName": "\\UpdaterTask", "image": "C:\\Windows\\System32\\schtasks.exe"}
+        }
+      },
+      "location": "EventChannel"
+    }
+  ]
+}

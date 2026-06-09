@@ -1,0 +1,33 @@
+{
+  "logs": [
+    {
+      "@timestamp": "2026-06-01T11:00:00Z",
+      "EVENTID": "4625",
+      "MESSAGE": "An account failed to log on. Caller: admin from 10.0.0.9",
+      "SEVERITY": "warning",
+      "SOURCE": "win-dc01",
+      "MITRE_TECHNIQUE": ["T1110"],
+      "USERNAME": "admin",
+      "SOURCE_IP": "10.0.0.9"
+    },
+    {
+      "@timestamp": "2026-06-01T11:01:30Z",
+      "EVENTID": "4625",
+      "MESSAGE": "An account failed to log on. Caller: admin from 10.0.0.9",
+      "SEVERITY": "warning",
+      "SOURCE": "win-dc01",
+      "MITRE_TECHNIQUE": ["T1110"],
+      "USERNAME": "admin",
+      "SOURCE_IP": "10.0.0.9"
+    },
+    {
+      "@timestamp": "2026-06-02T16:20:10Z",
+      "EVENTID": "4720",
+      "MESSAGE": "A user account was created: svc_backup",
+      "SEVERITY": "info",
+      "SOURCE": "win-dc01",
+      "MITRE_TECHNIQUE": ["T1136.001"],
+      "USERNAME": "svc_backup"
+    }
+  ]
+}

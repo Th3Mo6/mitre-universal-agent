@@ -1,0 +1,47 @@
+[project]
+name = "mitre-universal-agent"
+version = "0.1.0"
+description = "Universal MITRE AI Agent"
+authors = [
+    {name = "@Th3Mo6",email = "atom@xcorner.xyz"}
+]
+requires-python = ">=3.12"
+dependencies = [
+]
+readme = "README.md"
+
+[project.scripts]
+mitre-agent = "app:main"
+
+[tool.poetry]
+packages = [
+    {include = "core"},
+    {include = "plugins"},
+    {include = "ai_providers"},
+    {include = "webcontrol"},
+    {include = "app.py"},
+]
+include = [
+    {path = "config/*.json", format = ["sdist", "wheel"]},
+    {path = "docs/Architecture.md", format = "sdist"},
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=9.0.3,<10.0.0)",
+    "mypy (>=2.1.0,<3.0.0)",
+    "pytest-asyncio (>=1.4.0,<2.0.0)"
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
