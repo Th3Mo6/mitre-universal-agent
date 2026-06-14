@@ -61,8 +61,18 @@ def _level_to_severity(level: int) -> Severity:
 
 
 def _parse_ts(value: str) -> datetime:
-    """Parse a Wazuh ISO timestamp (handles trailing 'Z')."""
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    """Parse a Wazuh ISO timestamp into a timezone-aware UTC datetime.
+
+    Replaces only a trailing 'Z' (not stray inner ones) and attaches UTC when
+    the value is offset-naive, so comparisons against tz-aware query bounds
+    never raise.
+    """
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class WazuhPlugin:
@@ -90,7 +100,12 @@ class WazuhPlugin:
         mock_path = config.get("mock_path")
         self._mock_path = Path(mock_path) if mock_path else _DEFAULT_MOCK
 
-        self._api_available = self._probe_api()
+        # ``use_mock: true`` forces the mock path even if the endpoint is
+        # reachable (live querying is not implemented in v1).
+        if bool(config.get("use_mock", False)):
+            self._api_available = False
+        else:
+            self._api_available = self._probe_api()
         self._using_mock = not self._api_available
 
         if self._using_mock and not self._mock_path.exists():
@@ -208,8 +223,17 @@ class WazuhPlugin:
 
     def _load_alerts(self) -> list[dict[str, Any]]:
         if self._api_available:
-            # Real API path would go here; not reachable in sandbox.
-            return self._fetch_from_api()
+            try:
+                return self._fetch_from_api()
+            except NotImplementedError:
+                # Live querying isn't implemented yet: degrade to mock data
+                # rather than crash a reachable-but-unsupported endpoint.
+                if not self._mock_path.exists():
+                    raise
+                logger.warning(
+                    "Wazuh live query not implemented; using mock fallback (%s)",
+                    self._mock_path,
+                )
         raw = json.loads(self._mock_path.read_text(encoding="utf-8"))
         alerts = raw.get("alerts", raw if isinstance(raw, list) else [])
         return list(alerts)
@@ -233,13 +257,16 @@ class WazuhPlugin:
             Severity.INFO: 1,
         }.get(detection.severity or Severity.MEDIUM, 7)
 
+        # Emit techniques/logic as escaped child ELEMENTS, not XML comments:
+        # comments may not contain '--', which detection logic routinely does
+        # (e.g. "powershell -enc", "cmd --exec"), and would produce malformed XML.
         content = (
             '<group name="mitre,generated,">\n'
             '  <rule id="100000" level="{level}">\n'
             "    <description>{desc}</description>\n"
             "    <mitre>\n{mitre}    </mitre>\n"
-            "    <!-- techniques: {techniques} -->\n"
-            "    <!-- logic: {logic} -->\n"
+            "    <field name=\"techniques\">{techniques}</field>\n"
+            "    <field name=\"logic\">{logic}</field>\n"
             "  </rule>\n"
             "</group>\n"
         ).format(

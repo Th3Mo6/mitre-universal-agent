@@ -277,7 +277,7 @@ or AI credentials are required.
 
 This tool is **read-only** against your sources and **never deploys** generated
 rules — all output is statically validated and requires human review before
-deployment. See [`docs/Architecture.md`](docs/Architecture.md) 8 for the full
+deployment. See [`docs/Architecture.md`](docs/Architecture.md) §8 for the full
 security model.
 
 ---

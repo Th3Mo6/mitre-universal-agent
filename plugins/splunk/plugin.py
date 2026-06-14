@@ -42,7 +42,14 @@ _DEFAULT_MOCK = _REPO_ROOT / "tests" / "mocks" / "splunk_events.json"
 
 
 def _parse_ts(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    """Parse an ISO timestamp into a timezone-aware UTC datetime (trailing 'Z'
+    only; attaches UTC when offset-naive so comparisons never raise)."""
+    if value.endswith("Z"):
+        value = value[:-1] + "+00:00"
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 class SplunkPlugin:
@@ -69,7 +76,10 @@ class SplunkPlugin:
         mock_path = config.get("mock_path")
         self._mock_path = Path(mock_path) if mock_path else _DEFAULT_MOCK
 
-        self._api_available = self._probe_api()
+        if bool(config.get("use_mock", False)):
+            self._api_available = False
+        else:
+            self._api_available = self._probe_api()
         self._using_mock = not self._api_available
         if self._using_mock and not self._mock_path.exists():
             raise RuntimeError(
@@ -175,20 +185,34 @@ class SplunkPlugin:
         }
 
     def _load_results(self) -> list[dict[str, Any]]:
-        if self._api_available:  # pragma: no cover
-            raise NotImplementedError("live Splunk querying not implemented")
+        if self._api_available:
+            try:
+                return self._fetch_from_api()
+            except NotImplementedError:
+                if not self._mock_path.exists():
+                    raise
+                logger.warning(
+                    "Splunk live query not implemented; using mock (%s)",
+                    self._mock_path,
+                )
         raw = json.loads(self._mock_path.read_text(encoding="utf-8"))
         return list(raw.get("results", raw if isinstance(raw, list) else []))
+
+    def _fetch_from_api(self) -> list[dict[str, Any]]:  # pragma: no cover
+        raise NotImplementedError("live Splunk querying not implemented in v1")
 
     # --- detection authoring ------------------------------------------------ #
     def render_rule(self, detection: DetectionSpec) -> RenderedArtifact:
         """Render an SPL savedsearches.conf stanza."""
         search = detection.logic or "index=* | head 0"
         techniques = ",".join(detection.technique_ids)
+        # Stanza name and single-line keys must not span lines in .conf format.
+        title = " ".join(detection.title.split())
+        description = " ".join(detection.description.split())
         stanza = (
-            f"[{detection.title}]\n"
+            f"[{title}]\n"
             f"search = {search}\n"
-            f"description = {detection.description}\n"
+            f"description = {description}\n"
             "dispatch.earliest_time = -60m\n"
             "dispatch.latest_time = now\n"
             f"action.annotate.mitre = {techniques}\n"

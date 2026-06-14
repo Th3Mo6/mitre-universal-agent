@@ -6,7 +6,7 @@ control URL (including the access token). Run directly or via the
 
 Environment variables:
   AGENT_CONFIG    path to config JSON (default: config/default.json)
-  AGENT_HOST      bind host (default: 0.0.0.0)
+  AGENT_HOST      bind host (default: 127.0.0.1; set 0.0.0.0 to expose)
   AGENT_PORT      bind port (default: 8080)
   AGENT_TOKEN     fixed access token (default: auto-generated)
   AGENT_AUTOSTART "1" to start the paced scheduling loop on launch
@@ -44,7 +44,9 @@ def main() -> None:
     )
 
     config = os.environ.get("AGENT_CONFIG", str(_ROOT / "config" / "default.json"))
-    host = os.environ.get("AGENT_HOST", "0.0.0.0")
+    # Loopback by default; the systemd installer sets AGENT_HOST=0.0.0.0
+    # explicitly for the network control link.
+    host = os.environ.get("AGENT_HOST", "127.0.0.1")
     port = int(os.environ.get("AGENT_PORT", "8080"))
     token = os.environ.get("AGENT_TOKEN") or None
     autostart = os.environ.get("AGENT_AUTOSTART", "0") == "1"

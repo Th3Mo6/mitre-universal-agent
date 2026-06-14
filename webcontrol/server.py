@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -30,6 +31,15 @@ from urllib.parse import parse_qs, urlparse
 from core.runtime import AgentRuntime
 
 logger = logging.getLogger(__name__)
+
+_TOKEN_QS = re.compile(r"(token=)[^&\s]+")
+_SOURCE_NAME = re.compile(r"^[a-z0-9_-]+$")
+
+
+def _redact_token(text: str) -> str:
+    """Mask any ``token=...`` value so secrets don't leak into logs."""
+    return _TOKEN_QS.sub(r"\1<redacted>", text)
+
 
 _DASHBOARD = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -81,7 +91,8 @@ async function setStrategy(){const s=document.getElementById('strategy').value;
   const provs=s==='single'?['mock-primary']:['mock-primary','mock-secondary','mock-tertiary'];
   await fetch('/api/ai',{method:'POST',headers:{...hdr(),'Content-Type':'application/json'},
   body:JSON.stringify({strategy:s,providers:provs})});refresh();}
-async function toggle(name,enabled){await api('/api/sources/'+name+'/'+(enabled?'disable':'enable'),'POST');}
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+async function toggle(name,enabled){await api('/api/sources/'+encodeURIComponent(name)+'/'+(enabled?'disable':'enable'),'POST');}
 async function refresh(){
   const s=await (await fetch('/api/status',{headers:hdr()})).json();
   document.getElementById('tpr').value=s.scheduler.techniques_per_run;
@@ -90,13 +101,13 @@ async function refresh(){
   document.getElementById('status').textContent=JSON.stringify(s,null,2);
   document.getElementById('sources').innerHTML=s.sources.map(src=>{
     const cls=src.state==='active'?'on':(src.state==='error'?'err':'dis');
-    return `<div class="row"><span>${src.name} <span class="tag ${cls}">${src.state}</span></span>
-      <button class="${src.enabled?'off':''}" onclick="toggle('${src.name}',${src.enabled})">
+    return `<div class="row"><span>${esc(src.name)} <span class="tag ${esc(cls)}">${esc(src.state)}</span></span>
+      <button class="${src.enabled?'off':''}" onclick="toggle('${esc(src.name)}',${src.enabled?'true':'false'})">
       ${src.enabled?'Disable':'Enable'}</button></div>`}).join('');
   const res=await (await fetch('/api/results?limit=20',{headers:hdr()})).json();
   document.getElementById('results').innerHTML='<tbody><tr><th>Technique</th><th>Sources</th><th>Events</th></tr>'+
-    res.map(r=>`<tr><td><code>${r.technique_id}</code></td><td>${(r.sources_queried||[]).join(', ')||'—'}</td>
-    <td>${JSON.stringify(r.event_counts||{})}</td></tr>`).join('')+'</tbody>';
+    res.map(r=>`<tr><td><code>${esc(r.technique_id)}</code></td><td>${esc((r.sources_queried||[]).join(', ')||'—')}</td>
+    <td>${esc(JSON.stringify(r.event_counts||{}))}</td></tr>`).join('')+'</tbody>';
 }
 refresh();setInterval(refresh,5000);
 </script></body></html>"""
@@ -142,7 +153,9 @@ class _Handler(BaseHTTPRequestHandler):
             return {}
 
     def log_message(self, fmt: str, *args: Any) -> None:  # quieter logging
-        logger.info("%s - %s", self.address_string(), fmt % args)
+        # Redact any token query parameter so the secret never lands in logs.
+        msg = _redact_token(fmt % args)
+        logger.info("%s - %s", self.address_string(), msg)
 
     # --- routing ------------------------------------------------------------ #
     def do_GET(self) -> None:  # noqa: N802
@@ -150,15 +163,20 @@ class _Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self._send(200, _DASHBOARD.encode("utf-8"), "text/html; charset=utf-8")
             return
-        if path == "/api/status":
-            self._json(200, self.runtime.status())
-            return
-        if path == "/api/results":
+        # All API endpoints require auth (status leaks paths/providers/state).
+        if path in ("/api/status", "/api/results"):
             if not self._authorized():
                 self._json(401, {"error": "unauthorized"})
                 return
+            if path == "/api/status":
+                self._json(200, self.runtime.status())
+                return
             q = parse_qs(urlparse(self.path).query)
-            limit = int((q.get("limit") or ["50"])[0])
+            try:
+                limit = int((q.get("limit") or ["50"])[0])
+            except ValueError:
+                limit = 50
+            limit = max(0, min(limit, 1000))
             self._json(200, self.runtime.recent_results(limit))
             return
         self._json(404, {"error": "not found"})
@@ -172,6 +190,9 @@ class _Handler(BaseHTTPRequestHandler):
         try:
             if parts[:2] == ["api", "sources"] and len(parts) == 4:
                 name, action = parts[2], parts[3]
+                if not _SOURCE_NAME.match(name):
+                    self._json(400, {"error": "invalid source name"})
+                    return
                 if action == "enable":
                     self._json(200, self.runtime.enable_source(name))
                 elif action == "disable":
@@ -218,7 +239,7 @@ class ControlServer:
         self,
         runtime: AgentRuntime,
         *,
-        host: str = "0.0.0.0",
+        host: str = "127.0.0.1",
         port: int = 8080,
         token: str | None = None,
     ) -> None:
@@ -253,7 +274,7 @@ class ControlServer:
 def serve(
     config_path: str,
     *,
-    host: str = "0.0.0.0",
+    host: str = "127.0.0.1",
     port: int = 8080,
     token: str | None = None,
     autostart_loop: bool = False,

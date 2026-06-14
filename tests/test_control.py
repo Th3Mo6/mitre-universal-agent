@@ -8,7 +8,9 @@ loopback socket.
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -20,7 +22,7 @@ _CONFIG = Path(__file__).resolve().parents[1] / "config" / "default.json"
 
 
 @pytest.fixture()
-def runtime(tmp_path: Path) -> AgentRuntime:
+def runtime(tmp_path: Path) -> Iterator[AgentRuntime]:
     rt = AgentRuntime(_CONFIG, results_path=tmp_path / "results.jsonl")
     yield rt
     rt.close()
@@ -66,7 +68,7 @@ def test_runtime_set_techniques_per_run(runtime: AgentRuntime) -> None:
 # HTTP control plane
 # --------------------------------------------------------------------------- #
 @pytest.fixture()
-def server(tmp_path: Path):  # type: ignore[no-untyped-def]
+def server(tmp_path: Path) -> Iterator[ControlServer]:
     rt = AgentRuntime(_CONFIG, results_path=tmp_path / "r.jsonl")
     srv = ControlServer(rt, host="127.0.0.1", port=0, token="tok-123")
     import threading
@@ -107,9 +109,12 @@ def test_http_dashboard_served(server: ControlServer) -> None:
     assert b"Control Panel" in body
 
 
-def test_http_status_no_token_ok(server: ControlServer) -> None:
+def test_http_status_requires_token(server: ControlServer) -> None:
     base = f"http://127.0.0.1:{server.bound_port}"
-    code, body = _get(f"{base}/api/status")
+    # Unauthenticated status is rejected (it would leak paths/providers/state).
+    code_noauth, _ = _get(f"{base}/api/status")
+    assert code_noauth == 401
+    code, body = _get(f"{base}/api/status", token="tok-123")
     assert code == 200
     data = json.loads(body)
     assert data["scheduler"]["techniques_per_run"] == 5

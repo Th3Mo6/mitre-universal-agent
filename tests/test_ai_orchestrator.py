@@ -25,12 +25,15 @@ def test_mock_provider_satisfies_protocol() -> None:
 
 @pytest.mark.asyncio
 async def test_single_strategy() -> None:
-    providers = {"a": MockProvider("a", content="A"), "b": MockProvider("b", content="B")}
+    providers: dict[str, AIProvider] = {
+        "a": MockProvider("a", content="A"),
+        "b": MockProvider("b", content="B"),
+    }
     orch = AIOrchestrator(providers, _store(AIStrategy.SINGLE, ["a", "b"]))
     resp = await orch.complete(AIRequest(prompt="hi"))
     assert resp.ok
     assert resp.content == "A"  # only the first provider is used
-    assert providers["b"].call_count == 0
+    assert providers["b"].call_count == 0  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio

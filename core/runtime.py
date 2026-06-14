@@ -60,12 +60,14 @@ class AgentRuntime:
         self.scheduler = Scheduler(self.store, self.mitre, self.sources)
 
         self.results_path = Path(
-            results_path
-            or self.store.config.to_dict().get("results_path")  # type: ignore[arg-type]
-            or (self.config_path.parent / "results.jsonl")
+            results_path or (self.config_path.parent / "results.jsonl")
         )
 
         self._lock = threading.RLock()
+        # Serializes a full evaluation cycle (scheduler.run_once + persist) so
+        # concurrent /api/run requests and the background loop cannot interleave
+        # (ThreadingHTTPServer handles each request on its own thread).
+        self._run_lock = threading.Lock()
         self._loop_thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._last_run: dict[str, Any] | None = None
@@ -85,10 +87,9 @@ class AgentRuntime:
         return self.source_status(name)
 
     def set_techniques_per_run(self, value: int) -> int:
-        with self._lock:
-            sched = self.store.config.scheduler
-            sched.techniques_per_run = int(value)
-            sched.validate()
+        # Delegate to ConfigStore: validated-before-commit, locked, and emits a
+        # change event (so an invalid value never gets applied).
+        self.store.set_techniques_per_run(int(value))
         return self.store.config.scheduler.techniques_per_run
 
     def set_ai_strategy(self, strategy: str, providers: list[str]) -> dict[str, Any]:
@@ -102,11 +103,12 @@ class AgentRuntime:
 
     # --- evaluation --------------------------------------------------------- #
     def run_once(self) -> dict[str, Any]:
-        report = self.scheduler.run_once()
-        self._persist(report)
-        with self._lock:
-            self._run_count += 1
-            self._last_run = {
+        # Serialize the whole cycle so concurrent callers (manual /api/run +
+        # background loop) cannot interleave scheduler state or file writes.
+        with self._run_lock:
+            report = self.scheduler.run_once()
+            self._persist(report)
+            last_run = {
                 "at": datetime.now(timezone.utc).isoformat(),
                 "selected": report.selected,
                 "active_sources": report.active_sources,
@@ -121,7 +123,10 @@ class AgentRuntime:
                     for ev in report.evaluations
                 ],
             }
-        return self._last_run
+            with self._lock:
+                self._run_count += 1
+                self._last_run = last_run
+        return last_run
 
     def _persist(self, report: RunReport) -> None:
         self.results_path.parent.mkdir(parents=True, exist_ok=True)
@@ -147,7 +152,14 @@ class AgentRuntime:
         if not self.results_path.exists():
             return []
         lines = self.results_path.read_text(encoding="utf-8").strip().splitlines()
-        return [json.loads(ln) for ln in lines[-limit:]]
+        out: list[dict[str, Any]] = []
+        for ln in lines[-limit:]:
+            try:
+                out.append(json.loads(ln))
+            except json.JSONDecodeError:
+                # Tolerate a partially-flushed/corrupt trailing line.
+                logger.warning("skipping malformed results line")
+        return out
 
     # --- status ------------------------------------------------------------- #
     def source_status(self, name: str) -> dict[str, Any]:

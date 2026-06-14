@@ -209,9 +209,13 @@ class MitreEngine:
     ) -> list[str]:
         """Return technique IDs ordered by selection priority (Architecture §5.2).
 
-        Priority: never-evaluated → oldest evaluated (staleness) → larger gap
-        severity → observable-by-enabled-source. Unobservable techniques sort
-        last (deferred/flagged).
+        Observable-by-an-enabled-source is the PRIMARY key: techniques no
+        enabled source can observe can't be meaningfully evaluated, so they are
+        deferred to the very end. Within the observable set the order is:
+        never-evaluated first, then oldest-evaluated (staleness), then largest
+        coverage gap. Staleness is bucketed to whole seconds so the gap-severity
+        tiebreak is actually effective (sub-second timestamps would otherwise
+        make ties practically impossible).
         """
         report = self.compute_coverage(
             enabled_data_sources, existing_rules, last_evaluated
@@ -220,15 +224,16 @@ class MitreEngine:
         def sort_key(tid: str) -> tuple[Any, ...]:
             cov = report.per_technique[tid]
             never = cov.last_evaluated_at is None
-            # Older timestamps first; never-evaluated handled by `never` flag.
+            # Older timestamps first; whole-second bucket so gap_severity can
+            # break ties. never-evaluated handled by the `never` flag.
             staleness = (
-                cov.last_evaluated_at.timestamp()
+                int(cov.last_evaluated_at.timestamp())
                 if cov.last_evaluated_at is not None
-                else 0.0
+                else 0
             )
             gap_severity = CoverageLevel.COVERED - cov.level  # bigger = worse
             return (
-                not cov.observable,  # observable first (False < True)
+                not cov.observable,  # observable first; unobservable last
                 not never,  # never-evaluated first
                 staleness,  # then oldest
                 -int(gap_severity),  # then biggest gap

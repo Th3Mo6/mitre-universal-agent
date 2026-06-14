@@ -16,9 +16,10 @@ Targets Python 3.12+.
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from core.config_store import ConfigStore
@@ -79,6 +80,7 @@ class Scheduler:
         self._window_hours = window_hours
         # technique_id -> last evaluation time (staleness cursor, persisted-able)
         self._last_evaluated: dict[str, datetime] = {}
+        self._cursor_lock = threading.Lock()
 
     # --- configuration ------------------------------------------------------ #
     @property
@@ -100,15 +102,25 @@ class Scheduler:
     def select_batch(self) -> list[str]:
         """Return EXACTLY ``techniques_per_run`` technique IDs (or fewer only
         if the catalog is smaller than the batch size)."""
-        n = self.techniques_per_run
+        n = max(0, self.techniques_per_run)  # never slice with a negative n
         data_sources = self._enabled_data_sources()
         rules = [r for rs in self._sources.existing_rules().values() for r in rs]
+        with self._cursor_lock:
+            last_eval = dict(self._last_evaluated)
         order = self._mitre.selection_order(
             enabled_data_sources=data_sources,
             existing_rules=rules,
-            last_evaluated=dict(self._last_evaluated),
+            last_evaluated=last_eval,
         )
         return order[:n]
+
+    def _now(self) -> datetime:
+        """Clock output, normalized to timezone-aware UTC (defensive: an
+        injected clock may return a naive datetime)."""
+        now = self._clock()
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        return now
 
     # --- dispatch ----------------------------------------------------------- #
     def run_once(self) -> RunReport:
@@ -117,23 +129,25 @@ class Scheduler:
         selected = self.select_batch()
         report = RunReport(selected=list(selected), active_sources=list(active))
 
-        now = self._clock()
-        start = now.replace(microsecond=0)
-        spec_start = start.fromtimestamp(
-            start.timestamp() - self._window_hours * 3600, tz=timezone.utc
-        )
+        # Trailing window of exactly window_hours, both bounds tz-aware and on
+        # the same (whole-second) precision. Use timedelta, not timestamp
+        # round-tripping, so a naive clock can't shift the window by the local
+        # UTC offset.
+        end = self._now().replace(microsecond=0)
+        spec_start = end - timedelta(hours=self._window_hours)
 
         for tid in selected:
-            spec = QuerySpec(start=spec_start, end=now, technique_id=tid)
+            spec = QuerySpec(start=spec_start, end=end, technique_id=tid)
             # query_all only contacts ACTIVE sources (isolation guarantee).
             results = self._sources.query_all(spec)
-            self._last_evaluated[tid] = now
+            with self._cursor_lock:
+                self._last_evaluated[tid] = end
             report.evaluations.append(
                 EvaluationResult(
                     technique_id=tid,
                     sources_queried=list(results.keys()),
                     results=results,
-                    evaluated_at=now,
+                    evaluated_at=end,
                 )
             )
         logger.info(
@@ -145,7 +159,9 @@ class Scheduler:
 
     # --- cursor persistence helpers ----------------------------------------- #
     def last_evaluated(self) -> dict[str, datetime]:
-        return dict(self._last_evaluated)
+        with self._cursor_lock:
+            return dict(self._last_evaluated)
 
     def load_cursor(self, cursor: dict[str, datetime]) -> None:
-        self._last_evaluated = dict(cursor)
+        with self._cursor_lock:
+            self._last_evaluated = dict(cursor)

@@ -64,6 +64,7 @@ class ManagedSource:
     plugin: LogSourcePlugin | None = None
     last_error: str = ""
     detail: str = ""
+    applied_config: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -75,6 +76,10 @@ class SourceManager:
         self._factories: dict[str, PluginFactory] = {}
         self._sources: dict[str, ManagedSource] = {}
         self._lock = threading.RLock()
+        # Single-flights reconciliation so concurrent sync() calls (e.g. a
+        # config-change callback racing the constructor's sync) can't double-
+        # activate or leak plugins. Distinct from _lock (which guards the maps).
+        self._sync_lock = threading.Lock()
         self._unsubscribe = self._store.subscribe(self._on_config_change)
 
     # --- registration ------------------------------------------------------- #
@@ -85,14 +90,32 @@ class SourceManager:
             self._sources.setdefault(name, ManagedSource(name=name))
 
     def sync(self) -> None:
-        """Reconcile actual plugin state with the ConfigStore (idempotent)."""
-        for name in list(self._factories):
-            desired = self._store.is_source_enabled(name)
-            active = self._is_active(name)
-            if desired and not active:
-                self._activate(name)
-            elif not desired and active:
-                self._deactivate(name)
+        """Reconcile actual plugin state with the ConfigStore.
+
+        Idempotent and single-flighted: handles enable/disable edges AND config
+        drift (an already-active source whose config changed is re-initialized
+        so runtime config edits actually take effect).
+        """
+        with self._sync_lock:
+            for name in list(self._factories):
+                desired = self._store.is_source_enabled(name)
+                active = self._is_active(name)
+                if desired and not active:
+                    self._activate(name)
+                elif not desired and active:
+                    self._deactivate(name)
+                elif desired and active and self._config_drifted(name):
+                    logger.info("Config changed for '%s'; reactivating", name)
+                    self._deactivate(name)
+                    self._activate(name)
+
+    def _config_drifted(self, name: str) -> bool:
+        with self._lock:
+            managed = self._sources.get(name)
+            applied = dict(managed.applied_config) if managed else {}
+        cfg = self._store.config.sources.get(name)
+        current = dict(cfg.config) if cfg else {}
+        return applied != current
 
     # --- state queries ------------------------------------------------------ #
     def active_sources(self) -> list[str]:
@@ -112,25 +135,30 @@ class SourceManager:
     # --- lifecycle ---------------------------------------------------------- #
     def _activate(self, name: str) -> None:
         """Activate a source, failing closed on any error (Architecture §6.3)."""
+        # Read the source config from the store BEFORE taking our own lock, so
+        # we never nest the store lock under the manager lock (avoids a
+        # lock-ordering hazard with the config-change callback path).
+        cfg = self._store.config.sources.get(name)
+        source_cfg = dict(cfg.config) if cfg else {}
+
         with self._lock:
             factory = self._factories.get(name)
             if factory is None:
                 logger.warning("No factory registered for source '%s'", name)
                 return
             managed = self._sources.setdefault(name, ManagedSource(name=name))
-            cfg = self._store.config.sources.get(name)
-            source_cfg = dict(cfg.config) if cfg else {}
 
         try:
             plugin = factory()
             plugin.initialize(source_cfg)
             health = plugin.health_check()
             if health.state == HealthState.UNAVAILABLE:
-                # Fail closed: do not mark ACTIVE.
+                # Fail closed: do not mark ACTIVE. Don't let a shutdown error
+                # mask the real UNAVAILABLE reason.
                 try:
                     plugin.shutdown()
-                finally:
-                    pass
+                except Exception as se:  # noqa: BLE001
+                    logger.warning("shutdown after UNAVAILABLE for '%s': %s", name, se)
                 raise RuntimeError(f"health check UNAVAILABLE: {health.detail}")
         except Exception as exc:  # noqa: BLE001 - fail closed on any error
             with self._lock:
@@ -141,11 +169,26 @@ class SourceManager:
             logger.error("Failed to enable source '%s': %s", name, exc)
             return
 
+        # Re-check intent before committing: a disable toggle may have arrived
+        # while initialize/health_check ran outside the lock (TOCTOU guard).
+        if not self._store.is_source_enabled(name):
+            try:
+                plugin.shutdown()
+            except Exception as se:  # noqa: BLE001
+                logger.warning("shutdown of '%s' after disable race: %s", name, se)
+            with self._lock:
+                managed.plugin = None
+                managed.state = SourceState.DISABLED
+                managed.detail = "disabled during activation"
+            logger.info("Source '%s' disabled during activation; not activated", name)
+            return
+
         with self._lock:
             managed.plugin = plugin
             managed.state = SourceState.ACTIVE
             managed.last_error = ""
             managed.detail = health.detail
+            managed.applied_config = source_cfg
         logger.info("Source '%s' is ACTIVE (%s)", name, health.state)
 
     def _deactivate(self, name: str) -> None:
@@ -165,6 +208,7 @@ class SourceManager:
                 managed.plugin = None
                 managed.state = SourceState.DISABLED
                 managed.detail = "disabled"
+                managed.applied_config = {}
         logger.info("Source '%s' is DISABLED", name)
 
     # --- config reactivity -------------------------------------------------- #

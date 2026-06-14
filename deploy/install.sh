@@ -36,6 +36,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 [ -f "$SRC_DIR/app.py" ] || die "app.py not found in $SRC_DIR — run from the project tree."
 
+# Paths land verbatim in systemd's EnvironmentFile (no shell quoting), so
+# reject anything but a safe charset to avoid corrupting agent.env.
+for p in "$INSTALL_DIR" "$DATA_DIR" "$ENV_DIR"; do
+  case "$p" in
+    *[!A-Za-z0-9/_.-]*) die "path '$p' contains unsupported characters (use [A-Za-z0-9/_.-])." ;;
+  esac
+done
+
 # ---- 1. base packages ---------------------------------------------------
 log "Updating apt and installing base packages..."
 export DEBIAN_FRONTEND=noninteractive
@@ -45,11 +53,13 @@ apt-get install -y software-properties-common ca-certificates rsync curl
 # ---- 2. Python 3.12 -----------------------------------------------------
 if ! command -v "$PY" >/dev/null 2>&1; then
   log "Python 3.12 not found; installing..."
-  if ! apt-get install -y python3.12 python3.12-venv 2>/dev/null; then
+  if ! apt-get install -y python3.12 python3.12-venv; then
     warn "python3.12 not in default repos; adding deadsnakes PPA."
-    add-apt-repository -y ppa:deadsnakes/ppa
+    add-apt-repository -y ppa:deadsnakes/ppa \
+      || die "failed to add deadsnakes PPA; install python3.12 manually and re-run."
     apt-get update -y
-    apt-get install -y python3.12 python3.12-venv
+    apt-get install -y python3.12 python3.12-venv \
+      || die "failed to install python3.12 from deadsnakes."
   fi
 else
   # Ensure the venv module is present for the detected interpreter.
@@ -77,8 +87,12 @@ rsync -a --delete \
 
 # ---- 5. virtual environment --------------------------------------------
 log "Creating virtual environment..."
-"$PY" -m venv "$INSTALL_DIR/venv"
-"$INSTALL_DIR/venv/bin/python" -m pip install --upgrade pip >/dev/null
+# Idempotent: reuse an existing valid venv rather than recreating on re-run.
+[ -x "$INSTALL_DIR/venv/bin/python" ] || "$PY" -m venv "$INSTALL_DIR/venv"
+# pip upgrade is best-effort: the agent is stdlib-only, so don't abort the
+# whole install on an offline/proxy failure.
+"$INSTALL_DIR/venv/bin/python" -m pip install --upgrade pip >/dev/null 2>&1 \
+  || warn "pip upgrade skipped (offline?) — continuing."
 # The agent has no third-party runtime deps; install the package if a wheel
 # build is desired (optional, ignored on failure since stdlib-only works).
 if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
@@ -88,7 +102,14 @@ fi
 ok "Environment ready."
 
 # ---- 6. environment file (token + settings) -----------------------------
-TOKEN="$(head -c 32 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)"
+# Prefer openssl for a fixed-length, high-entropy token; fall back to urandom
+# with a length assertion so we never emit a short/low-entropy token.
+if command -v openssl >/dev/null 2>&1; then
+  TOKEN="$(openssl rand -hex 32)"
+else
+  TOKEN="$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 32)"
+  [ "${#TOKEN}" -eq 32 ] || die "token generation failed (got ${#TOKEN} chars)."
+fi
 log "Writing $ENV_DIR/agent.env ..."
 cat > "$ENV_DIR/agent.env" <<EOF
 AGENT_CONFIG=$INSTALL_DIR/config/default.json
@@ -103,6 +124,8 @@ chmod 640 "$ENV_DIR/agent.env"
 # ---- 7. permissions -----------------------------------------------------
 chown -R "$SERVICE_USER":"$SERVICE_USER" "$INSTALL_DIR" "$DATA_DIR"
 chown -R root:"$SERVICE_USER" "$ENV_DIR"
+# Token file (640) + dir (750): only root and the service group can read it.
+chmod 750 "$ENV_DIR"
 
 # ---- 8. systemd service -------------------------------------------------
 log "Installing systemd service..."

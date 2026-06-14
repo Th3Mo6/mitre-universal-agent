@@ -14,12 +14,15 @@ Targets Python 3.12+.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AIStrategy",
@@ -70,11 +73,19 @@ class SchedulerConfig:
     mode: SchedulerMode = SchedulerMode.EVEN
     max_concurrent: int = 1
 
+    # Generous upper bounds to catch fat-finger config without constraining
+    # legitimate use (the full ATT&CK matrix is < 1000 techniques).
+    _MAX = 100_000
+
     def validate(self) -> None:
-        if self.techniques_per_hour < 1:
-            raise ConfigError("scheduler.techniques_per_hour must be >= 1")
-        if self.techniques_per_run < 1:
-            raise ConfigError("scheduler.techniques_per_run must be >= 1")
+        if not 1 <= self.techniques_per_hour <= self._MAX:
+            raise ConfigError(
+                f"scheduler.techniques_per_hour must be in [1, {self._MAX}]"
+            )
+        if not 1 <= self.techniques_per_run <= self._MAX:
+            raise ConfigError(
+                f"scheduler.techniques_per_run must be in [1, {self._MAX}]"
+            )
         if self.max_concurrent < 1:
             raise ConfigError("scheduler.max_concurrent must be >= 1")
 
@@ -202,8 +213,15 @@ class ConfigStore:
         return _unsubscribe
 
     def _emit(self, change: ConfigChange) -> None:
-        for listener in list(self._listeners):
-            listener(change)
+        # Snapshot under the lock, then deliver outside it (avoids re-entrancy/
+        # deadlock). One failing listener must not block delivery to the rest.
+        with self._lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener(change)
+            except Exception:  # noqa: BLE001 - isolate listener failures
+                logger.exception("config change listener failed")
 
     # --- mutation ----------------------------------------------------------- #
     def set_source_enabled(self, name: str, enabled: bool) -> None:
@@ -228,10 +246,23 @@ class ConfigStore:
                 mode=self._config.scheduler.mode,
                 max_concurrent=self._config.scheduler.max_concurrent,
             )
-            new.validate()
+            new.validate()  # raises BEFORE we commit anything
             self._config.scheduler = new
             snapshot = self._config
         self._emit(ConfigChange("scheduler", "techniques_per_hour", snapshot))
+
+    def set_techniques_per_run(self, value: int) -> None:
+        with self._lock:
+            new = SchedulerConfig(
+                techniques_per_hour=self._config.scheduler.techniques_per_hour,
+                techniques_per_run=value,
+                mode=self._config.scheduler.mode,
+                max_concurrent=self._config.scheduler.max_concurrent,
+            )
+            new.validate()  # raises BEFORE we commit anything
+            self._config.scheduler = new
+            snapshot = self._config
+        self._emit(ConfigChange("scheduler", "techniques_per_run", snapshot))
 
     def set_ai_strategy(self, strategy: AIStrategy, providers: list[str]) -> None:
         with self._lock:
